@@ -1,4 +1,7 @@
-from typing import Callable
+from typing import Any, Callable
+import json
+from llm import Response
+from toolbox import multiply
 
 class Tools:
     """Tools registry for the Agent"""
@@ -18,6 +21,7 @@ class Tools:
             """
         self.registry[name] ={"function":func, "description":description}
 
+    
     @property
     def schemas(self)->None:
         """Used only for native tool-calling"""
@@ -39,8 +43,54 @@ class Tools:
         in completing tasks:
         {self.description}
         
-        To use a tool, respons with JSON:
+        To use a tool, respond with JSON:
         {{"tool:"name","kwargs":{{"param":"value"}}}}
         """
     
 
+    def parse(self,response:Response)->Response:
+            """Parse a JSON tool call from text"""
+            text = response.content
+            if '"tool":' in text or "'tool':" in text:
+                start, end = text.find("{"), text.rfind("}") + 1
+                tool_call = json.loads(text[start:end])
+    
+                # Add the parsed tool call to the response
+                return Response(content=response.content, reasoning=response.reasoning, tool_call=tool_call,metadata=response.metadata)
+            return response
+
+    def execute(self,response:Response)->Any:
+        """Run a registered tool.
+
+        Arguments:
+            response: A response containing a parsed tool call.
+        """
+        tool_call = response.tool_call
+        name, kwargs = tool_call["tool"], tool_call.get("kwargs", {})
+
+        # Human in the loop: ask before running dangerous tools.
+        if name in self.registry and name in self.requires_approval:
+            approval = input(f"Allow {name}? (y/n): ").strip().lower()
+            if approval not in ("y", "yes"):
+                return f"Tool {name} was denied by the user."
+
+        # Handle registered tools.
+        if name in self.registry:
+            tool_func = self.registry[name]["function"]
+            return tool_func(**kwargs)
+
+        return f"Tool {name} not found."
+
+    def observation(self,result:str)->tuple[str,str]:
+        """Return the observation as a user"""
+        return "user",f"OBSERVATION:{result}"
+
+    def is_done(self,response:Response)->bool:
+        """The TinyAgent's stopping mechanism"""
+        if not response.tool_call:
+            return True
+        if response.tool_call["tool"] == "final_answer":
+            response.content = response.tool_call.get("kwargs","")
+            return True
+        return False
+    
